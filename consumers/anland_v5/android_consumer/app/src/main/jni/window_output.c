@@ -148,23 +148,60 @@ static bool allocate_slot(struct window_output *output, int width, int height)
         return false;
     }
     output->length = (size_t)(stride * (uint64_t)height);
+
+    /* Samsung/vendored kernels often lack the generic AOSP dmabuf heap but do
+     * expose legacy ION. Try dmabuf heap first, then fall back to ION's system
+     * heap (heap_id_mask 0x1), the same heap Mesa/kbase uses on this device.
+     * ABI from device kernel include/uapi/linux/ion.h. */
+    int fd = -1;
     int heap = open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC);
-    if (heap < 0) {
-        LOGE("open /dev/dma_heap/system failed: %s", strerror(errno));
-        return false;
+    if (heap >= 0) {
+        struct dma_heap_allocation_data allocation = {
+            .len = output->length,
+            .fd_flags = O_RDWR | O_CLOEXEC,
+        };
+        int ret = ioctl(heap, DMA_HEAP_IOCTL_ALLOC, &allocation);
+        int err = errno;
+        close(heap);
+        if (ret == 0)
+            fd = (int)allocation.fd;
+        else
+            LOGE("DMA_HEAP_IOCTL_ALLOC failed: %s", strerror(err));
+    } else {
+        LOGE("open /dev/dma_heap/system failed: %s (trying /dev/ion)", strerror(errno));
     }
-    struct dma_heap_allocation_data allocation = {
-        .len = output->length,
-        .fd_flags = O_RDWR | O_CLOEXEC,
-    };
-    int ret = ioctl(heap, DMA_HEAP_IOCTL_ALLOC, &allocation);
-    int err = errno;
-    close(heap);
-    if (ret < 0) {
-        LOGE("DMA_HEAP_IOCTL_ALLOC failed: %s", strerror(err));
-        return false;
+
+    if (fd < 0) {
+        struct ion_allocation_data {
+            __u64 len;
+            __u32 heap_id_mask;
+            __u32 flags;
+            __u32 fd;
+            __u32 unused;
+        };
+        #define ION_IOC_MAGIC 'I'
+        #define ION_IOC_ALLOC _IOWR(ION_IOC_MAGIC, 0, struct ion_allocation_data)
+        int ion = open("/dev/ion", O_RDONLY | O_CLOEXEC);
+        if (ion < 0) {
+            LOGE("open /dev/ion failed: %s", strerror(errno));
+            return false;
+        }
+        struct ion_allocation_data alloc = {
+            .len = output->length,
+            .heap_id_mask = 0x1, /* ION_HEAP_TYPE_SYSTEM */
+            .flags = 0,
+        };
+        int ret = ioctl(ion, ION_IOC_ALLOC, &alloc);
+        int err = errno;
+        close(ion);
+        if (ret < 0) {
+            LOGE("ION_IOC_ALLOC failed: %s", strerror(err));
+            return false;
+        }
+        fd = (int)alloc.fd;
+        LOGI("staging slot allocated via /dev/ion system heap");
     }
-    output->fd = (int)allocation.fd;
+    output->fd = fd;
     output->info = (struct buf_info){
         .stride = (uint32_t)stride,
         .width = (uint32_t)width,
