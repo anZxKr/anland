@@ -125,6 +125,7 @@ target_link_libraries(inputgrab log)
 # restores every promoted process on focus changes (mode 1), fallback, EOF, or
 # shutdown.
 # Same lib*.so packaging trick so it lands in nativeLibraryDir executable.
+if(NOT ANDROID_ABI STREQUAL "armeabi-v7a")
 add_executable(settopapp
     settopapp.c
 )
@@ -137,3 +138,4 @@ set_target_properties(settopapp PROPERTIES
 
 target_compile_options(settopapp PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(settopapp log)
+endif()
